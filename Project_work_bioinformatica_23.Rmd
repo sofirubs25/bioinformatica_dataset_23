@@ -1,0 +1,549 @@
+---
+title: "Project_work_bioinformatica_23"
+author: "Rossi Alice"
+date: "2025-06-22"
+output: html_document
+---
+
+# Caricamento dei dati 
+
+```{r}
+# Carica i dati dai CSV
+data <- read.csv("dataset_23.csv", row.names = 1)
+data2 <- read.csv("sample_info_dataset_23.csv", row.names = 1)
+
+# Visualizza le prime righe per verificare il caricamento
+head(data[, 1:5])
+head(data2)
+```
+
+Dataset caricati con successo! 
+- **data**: contiene la matrice di espressione genica con geni come righe e campioni come colonne
+- **data2**: contiene le informazioni sui campioni (status clinico, age, sample_id)
+
+---
+
+# Pulizia del dataset 
+
+```{r}
+# Converte tutti i valori in numerici (per sicurezza)
+expr_matrix <- data.frame(lapply(data, as.numeric))
+rownames(expr_matrix) <- rownames(data)
+
+# Controlla se esistono duplicati nei nomi dei geni
+any(duplicated(rownames(expr_matrix)))
+
+# Controlla se ci sono NA 
+any(is.na(expr_matrix))
+
+# Rimuove i geni con espressione 0 in ogni campione
+genes_all_zero <- rowSums(expr_matrix) == 0
+data_nozero <- expr_matrix[!genes_all_zero, ]
+
+cat("Geni totali prima della pulizia:", nrow(expr_matrix), "\n")
+cat("Geni mantenuti dopo rimozione zero:", nrow(data_nozero), "\n")
+
+# Summary sul dataset pulito
+summary(data_nozero[, 1:5])
+```
+
+## Descrizione della pulizia
+
+Durante questa fase si procede "pulendo" il dataset. Spesso, infatti, i dati possono contenere simboli o caratteri che possono creare problemi durante l'analisi. 
+
+Si controlla se ci sono duplicati nella prima colonna del dataset, che contiene i nomi dei geni. L'output mostra se sono presenti duplicati.
+
+Come per i duplicati, controlliamo se ci sono valori mancanti (NA) all'interno del dataset. 
+
+Successivamente ci si concentra sui geni che non esprimono alcun segnale in tutti i campioni: cioè quei geni che hanno valore zero in ogni colonna di espressione. Questi geni non portano informazioni utili, quindi li rimuoviamo.
+
+A questo punto che il dataset è pulito dagli "errori" più grossolani, può essere sintetizzato in un breve riassunto statistico.
+
+---
+
+# Analisi della profondità di sequenziamento 
+
+```{r}
+# Calcola la profondità di sequenziamento per ogni campione
+depth_per_sample <- colSums(data_nozero)
+print(depth_per_sample)
+
+# Grafico a barre
+barplot(depth_per_sample,
+        main = "Profondità di sequenziamento per paziente",
+        xlab = "Pazienti",
+        ylab = "Somma delle espressioni",
+        col = "steelblue",
+        las = 2) 
+
+# Boxplot
+boxplot(depth_per_sample, 
+        main = "Distribuzione della profondità di sequenziamento",
+        ylab = "Somma delle espressioni")
+```
+
+## Interpretazione
+
+La profondità di sequenziamento per ogni paziente rappresenta quanto "dati" sono stati raccolti per ciascun paziente. È fondamentale per verificare che non ci siano campioni con quantità di dati troppo bassa o molto diversa dagli altri. 
+
+Il grafico a barre mostra la distribuzione tra i pazienti, mentre il boxplot fornisce una sintesi statistica mostrando la mediana, i quartili e i valori estremi.
+
+---
+
+# Normalizzazione con trasformazione logaritmica
+
+```{r}
+# Trasformazione log2
+data_log <- log2(data_nozero + 1)
+
+# Istogramma della distribuzione
+hist(as.numeric(as.matrix(data_log)),
+     breaks = 100,
+     main = "Distribuzione log2 delle espressioni (tutti i geni e pazienti)",
+     xlab = "log2(count + 1)",
+     ylab = "Frequenza",
+     col = "steelblue")
+```
+
+## Interpretazione
+
+La trasformazione logaritmica in base 2 è utile perché i dati di espressione genica spesso hanno una distribuzione fortemente asimmetrica. L'applicazione del logaritmo aiuta a rendere la distribuzione più simmetrica e ad attenuare gli effetti di valori molto grandi.
+
+L'istogramma mostra la distribuzione dopo la trasformazione. Notiamo eventuali picchi verso lo zero (rappresentanti geni poco espressi) e la forma generale della distribuzione.
+
+---
+
+# Filtraggio dei geni scarsamente espressi
+
+```{r}
+# Applica un filtro: mantieni solo geni con espressione > 2 in almeno 3 campioni
+filter_index <- apply(data_nozero, 1, function(x) sum(x > 2) >= 3)
+filtered_data <- data_nozero[filter_index, ]
+
+cat("Geni tenuti dopo filtraggio:", nrow(filtered_data), "\n")
+cat("Geni rimossi:", nrow(data_nozero) - nrow(filtered_data), "\n")
+```
+
+## Spiegazione del filtro
+
+Dopo aver osservato la distribuzione dei livelli di espressione genica normalizzati, si applica un ulteriore filtro per rimuovere quei geni che risultano espressi in modo trascurabile nella maggior parte dei campioni.
+
+Il criterio scelto: mantenere solo quei geni che presentano un'espressione maggiore di 2 in almeno 3 pazienti. Questo bilancia la necessità di eliminare il rumore mantenendo un numero sufficiente di geni potenzialmente informativi.
+
+---
+
+# Verifica della distribuzione post-filtraggio
+
+```{r}
+# Trasformazione log2 dei dati filtrati
+filtered_data_log <- log2(filtered_data + 1)
+
+# Istogramma post-filtraggio
+hist(as.numeric(as.matrix(filtered_data_log)),
+     breaks = 100,
+     main = "Distribuzione log2 dopo filtraggio",
+     xlab = "log2(count + 1)",
+     ylab = "Frequenza",
+     col = "steelblue")
+```
+
+Dopo il filtraggio, la distribuzione dovrebbe risultare più equilibrata, con riduzione del picco verso lo zero.
+
+---
+
+# Distribuzione dell'espressione per singolo campione
+
+```{r}
+library(ggplot2)
+
+# Istogramma per un campione rappresentativo
+ggplot(as.data.frame(filtered_data), aes(x = C51)) +
+  geom_histogram(bins = 150, fill = "lightblue", color = "black") +
+  ggtitle("Distribuzione dell'espressione genica - Campione C51") +
+  xlab("Conteggi di espressione") +
+  ylab("Frequenza") +
+  theme_minimal()
+```
+
+---
+
+# Istogrammi per tutti i campioni
+
+```{r}
+library(ggplot2)
+
+# Crea istogrammi per ogni campione
+for (i in colnames(filtered_data_log)) {
+  data_plot <- data.frame(log_count = filtered_data_log[[i]])
+  
+  p <- ggplot(data_plot, aes(x = log_count)) +
+    geom_histogram(bins = 150, fill = "lightblue", color = "black") +
+    ggtitle(paste("Distribuzione log2(counts+1) -", i)) +
+    xlab("log2(counts + 1)") +
+    ylab("Frequenza") +
+    theme_minimal()
+  
+  print(p)
+}
+```
+
+---
+
+# Analisi Differenziale dell'Espressione Genica (DEG)
+
+```{r}
+library(DESeq2)
+library(tibble)
+
+# Verifica che i nomi dei campioni corrispondano
+stopifnot(all(rownames(data2) == colnames(filtered_data)))
+
+# Crea l'oggetto DESeqDataSet
+dds <- DESeqDataSetFromMatrix(
+  countData = round(filtered_data), 
+  colData = data2,
+  design = ~ status
+)
+
+# Applica un filtro pre-analysis (almeno 10 conte totali)
+dds <- dds[rowSums(counts(dds)) > 10, ]
+
+# Esegui l'analisi DESeq2
+dds <- DESeq(dds)
+
+# Estrai i risultati del contrasto COVID vs NONCOVID
+res <- results(dds, contrast = c("status", "COVID", "NONCOVID"))
+
+summary(res)
+```
+
+## Interpretazione
+
+DESeq2 esegue i passaggi principali dell'analisi:
+- Normalizzazione dei dati
+- Stima della dispersione
+- Fitting del modello
+- Test di significatività statistica per ogni gene
+
+L'output mostra il numero totale di geni testati e quanti risultano significativamente up/down-regolati.
+
+---
+
+# Selezione dei DEGs significativi
+
+```{r}
+# Applica filtri stringenti: padj < 0.05 e |log2FoldChange| > 1
+res_sig <- res[which(res$padj < 0.05 & abs(res$log2FoldChange) > 1), ]
+
+cat("Geni differenzialmente espressi significativi:", nrow(res_sig), "\n")
+
+# Conta up-regulated e down-regulated
+up_reg <- sum(res_sig$log2FoldChange > 0, na.rm = TRUE)
+down_reg <- sum(res_sig$log2FoldChange < 0, na.rm = TRUE)
+
+cat("Up-regolati (COVID):", up_reg, "\n")
+cat("Down-regolati (COVID):", down_reg, "\n")
+
+summary(res_sig)
+```
+
+## Spiegazione dei criteri
+
+Il doppio criterio consente di ridurre i falsi positivi e concentrare l'analisi sui geni effettivamente coinvolti:
+- **padj < 0.05**: significatività statistica dopo correzione per confronti multipli
+- **|log2FoldChange| > 1**: almeno un raddoppio o dimezzamento dell'espressione
+
+---
+
+# Visualizzazione della distribuzione dei p-value
+
+```{r}
+# P-value grezzi
+pvals_clean <- res$pvalue[!is.na(res$padj)]
+hist(pvals_clean, breaks = 50, col = "lightblue", 
+     main = "Distribuzione dei p-value (tutti i geni)", 
+     xlab = "p-value")
+
+# P-value dei DEGs significativi
+pvals_sig <- res_sig$pvalue[!is.na(res_sig$padj)]
+hist(pvals_sig, breaks = 50, col = "lightcoral", 
+     main = "Distribuzione dei p-value (DEGs significativi)", 
+     xlab = "p-value")
+```
+
+---
+
+# Shrinkage dei log2FoldChange
+
+```{r}
+# Applica shrinkage per migliorare l'affidabilità delle stime
+res_shrink <- lfcShrink(dds, contrast = c("status", "COVID", "NONCOVID"), 
+                         type = "normal")
+
+# Istogramma dei log2FoldChange shrinkati
+hist(res_shrink$log2FoldChange,
+     breaks = 50,
+     col = "lightblue",
+     main = "Distribuzione dei log2FoldChange (shrinkati)",
+     xlab = "log2FoldChange")
+```
+
+Lo shrinkage riduce l'effetto di valori estremi non affidabili, riportandoli verso il centro.
+
+---
+
+# MA-plot
+
+```{r}
+plotMA(res, ylim = c(-5, 5), main = "MA-plot: COVID vs NONCOVID")
+```
+
+## Interpretazione
+
+Il grafico MA visualizza la relazione tra:
+- **Asse X (A)**: media dei conteggi normalizzati (livello di espressione globale)
+- **Asse Y (M)**: log2FoldChange (variazione tra COVID e NONCOVID)
+
+Punti blu = geni differenzialmente espressi significativi
+Punti grigi = geni non significativi
+
+---
+
+# Volcano Plot
+
+```{r}
+library(EnhancedVolcano)
+
+EnhancedVolcano(res_shrink,
+                lab = rownames(res_shrink),
+                x = 'log2FoldChange',
+                y = 'pvalue',
+                title = 'Volcano Plot: COVID vs NONCOVID',
+                pCutoff = 0.05,
+                FCcutoff = 1,
+                colAlpha = 0.6)
+```
+
+## Interpretazione
+
+Il volcano plot mostra simultaneamente:
+- **Asse X**: log2FoldChange (entità della variazione)
+- **Asse Y**: -log10(p-value) (significatività statistica)
+
+I colori indicano:
+- **Rosso**: geni sia statisticamente che biologicamente significativi
+- **Blu/Verde**: geni con uno solo dei due criteri
+- **Grigio**: geni non significativi
+
+---
+
+# Heatmap dei top DEGs
+
+```{r}
+library(pheatmap)
+
+# Stabilizza la varianza e trasforma i dati
+vsd <- vst(dds, blind = FALSE)
+
+# Seleziona i top 30 geni più significativi
+top_genes <- head(rownames(res_sig[order(res_sig$padj), ]), 30)
+top_genes <- top_genes[top_genes %in% rownames(vsd)]
+
+# Estrae i dati per la heatmap
+heatmap_data <- assay(vsd)[top_genes, ]
+
+# Scala i dati per riga
+heatmap_scaled <- t(scale(t(heatmap_data)))
+
+# Crea la heatmap
+pheatmap::pheatmap(heatmap_scaled,
+                   annotation_col = as.data.frame(colData(vsd)["status"]),
+                   show_rownames = TRUE,
+                   fontsize_row = 8,
+                   clustering_distance_rows = "euclidean",
+                   clustering_method = "complete",
+                   main = "Heatmap dei Top 30 DEGs")
+```
+
+## Interpretazione
+
+La heatmap mostra:
+- **Righe**: i top 30 geni differenzialmente espressi
+- **Colonne**: i campioni
+- **Colori rossi**: sovraespressione
+- **Colori blu**: sottoespressione
+
+Il clustering gerarchico mostra come campioni e geni si raggruppano in base all'espressione.
+
+---
+
+# PCA Plot
+
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+
+# Calcola le componenti principali
+pca_data <- plotPCA(vsd, intgroup = "status", returnData = TRUE)
+pca_data$name <- rownames(pca_data)
+
+# Visualizza il PCA
+ggplot(pca_data, aes(PC1, PC2, color = status, label = name)) +
+  geom_point(size = 4) +
+  geom_text_repel(size = 3) +
+  theme_minimal() +
+  labs(title = "PCA: Analisi delle componenti principali",
+       x = paste0("PC1 (", round(pca_data$PC1[1]*100/sum(pca_data$PC1)*100, 1), "%)"),
+       y = paste0("PC2 (", round(pca_data$PC2[1]*100/sum(pca_data$PC2)*100, 1), "%)"),
+       color = "Status")
+```
+
+## Interpretazione
+
+Il PCA plot mostra una visione complessiva della separazione tra i due gruppi (COVID vs NONCOVID) basata sull'espressione genica globale. Una buona separazione lungo PC1 indica che lo status clinico è fortemente associato ai cambiamenti di espressione.
+
+---
+
+# Top 5 DEGs per magnitude di fold-change
+
+```{r}
+# Ordina per valore assoluto di log2FoldChange
+top5_DEGs <- res_sig[order(abs(res_sig$log2FoldChange), decreasing = TRUE), ][1:5, ]
+
+print(top5_DEGs)
+
+cat("\nInterpretazione:\n")
+cat("Questi sono i 5 geni con la variazione di espressione più ampia tra COVID e NONCOVID\n")
+```
+
+---
+
+# Analisi di arricchimento funzionale (GSEA)
+
+```{r}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+# Estrae i log2FoldChange shrinkati
+lfc_ordered <- res_shrink$log2FoldChange
+names(lfc_ordered) <- rownames(res_shrink)
+
+# Ordina in modo decrescente
+lfc_ordered <- sort(lfc_ordered, decreasing = TRUE)
+
+# Converte i nomi da SYMBOL a ENTREZID
+gene_df <- bitr(names(lfc_ordered), 
+                fromType = "SYMBOL", 
+                toType = "ENTREZID", 
+                OrgDb = org.Hs.eg.db)
+
+# Filtra e rinomina la lista
+lfc_ordered <- lfc_ordered[gene_df$SYMBOL]
+names(lfc_ordered) <- gene_df$ENTREZID
+
+cat("Gene convertiti a ENTREZID:", length(lfc_ordered), "\n")
+```
+
+---
+
+# GSEA su processi biologici (BP)
+
+```{r}
+library(clusterProfiler)
+
+# Esegui GSEA su processi biologici
+gsea_res <- gseGO(geneList = lfc_ordered, 
+                   OrgDb = org.Hs.eg.db,
+                   ont = "BP",
+                   keyType = "ENTREZID",
+                   minGSSize = 10,
+                   maxGSSize = 500,
+                   pvalueCutoff = 0.05,
+                   verbose = TRUE)
+
+# Visualizza i top risultati
+head(gsea_res, 10)
+
+cat("\nNumero di processi biologici significativamente arricchiti:", nrow(gsea_res), "\n")
+```
+
+---
+
+# Dotplot GSEA
+
+```{r}
+library(clusterProfiler)
+library(enrichplot)
+
+dotplot(gsea_res, showCategory = 15, 
+        title = "GSEA - Top 15 Processi Biologici",
+        color = "NES")
+```
+
+## Interpretazione
+
+Il dotplot mostra i processi biologici significativamente arricchiti. 
+- **Asse X**: GeneRatio (proporzione di geni coinvolti)
+- **Colore**: NES (Normalized Enrichment Score) - più rosso = arricchimento positivo
+- **Dimensione**: numero di geni associati al processo
+
+---
+
+# Ridgeplot GSEA
+
+```{r}
+library(clusterProfiler)
+library(enrichplot)
+
+ridgeplot(gsea_res, showCategory = 20)
+```
+
+## Interpretazione
+
+Il ridgeplot mostra come i geni di ciascun processo biologico si distribuiscono nella lista ordinata per log2FoldChange. Curve spostate verso destra indicano geni prevalentemente upregolati nei COVID.
+
+---
+
+# Analisi di arricchimento GO classica
+
+```{r}
+library(clusterProfiler)
+
+# Esegui enrichGO sui geni significativamente differenziali
+egoBP <- enrichGO(gene = rownames(res_sig), 
+                  universe = rownames(res),
+                  keyType = "SYMBOL",
+                  OrgDb = org.Hs.eg.db,
+                  ont = "BP",
+                  pAdjustMethod = "BH",
+                  pvalueCutoff = 0.01,
+                  qvalueCutoff = 0.05,
+                  readable = TRUE)
+
+cat("Processi biologici significativi:", nrow(egoBP), "\n")
+head(egoBP, 10)
+```
+
+---
+
+# Visualizzazione risultati enrichGO
+
+```{r}
+library(clusterProfiler)
+library(enrichplot)
+
+# Dotplot degli arricchimenti GO
+dotplot(egoBP, showCategory = 20, 
+        title = "GO Enrichment - Processi Biologici",
+        color = "p.adjust")
+```
+
+---
+
+# Conclusione
+
+Questa analisi ha identificato i geni differenzialmente espressi tra pazienti COVID e NONCOVID, rivelando importanti cambiamenti nei processi biologici sottostanti l'infezione da SARS-CoV-2. 
+
+I pathway arricchiti forniscono insighs biologicamente rilevanti sui meccanismi di risposta all'infezione virale.
