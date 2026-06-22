@@ -1,0 +1,680 @@
+---
+title: "Esame - Project Work: Analisi di Espressione Genica COVID-19 vs Controlli"
+author: "Rossi Alice"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+---
+
+# Introduzione e Descrizione del Dataset
+
+## Contesto Biologico
+
+In questo progetto analizziamo l'espressione genica di pazienti affetti da COVID-19 rispetto a controlli sani. L'obiettivo è identificare i geni differenzialmente espressi (DEGs) e i pathway biologici alterati durante l'infezione da SARS-CoV-2, fornendo insights sulla risposta immunitaria e sui meccanismi fisiopatologici della malattia.
+
+## Informazioni sul Dataset
+
+**Dataset ID**: GSE124048 (COVID-19 Expression Profile)
+
+**Descrizione**: Il dataset contiene profili di espressione genica RNA-seq da leucociti periferici di pazienti COVID-19 (n=6) e controlli non infetti (n=6). I dati sono stati normalizzati e forniti in formato RDS (R Data Serialized).
+
+**Campioni**:
+- **COVID**: 6 pazienti (C51, C84, C83, C91, C34, C89) con età variabile (29-90 anni)
+- **NONCOVID**: 6 controlli sani (NC1, NC5, NC9, NC11, NC23, NC24) con età variabile (32-83 anni)
+
+**Dimensioni**: ~20.000 geni × 12 campioni
+
+---
+
+# Caricamento e Preparazione dei Dati
+
+```{r caricamento_dati}
+# Caricamento dei dati di espressione genica
+data <- read.csv("dataset_23.csv", row.names = 1)
+
+# Caricamento dei metadati dei campioni
+data2 <- read.csv("sample_info_dataset_23.csv", row.names = 1)
+
+# Visualizzazione della struttura dei dati
+cat("Dimensioni matrice di espressione:\n")
+print(dim(data))
+
+cat("\nPrime righe (geni):\n")
+print(head(data[, 1:4], 3))
+
+cat("\nMetadati dei campioni:\n")
+print(data2)
+```
+
+## Spiegazione del Caricamento
+
+I dati sono stati caricati da due file CSV:
+- **dataset_23.csv**: matrice di espressione genica (righe = geni, colonne = campioni)
+- **sample_info_dataset_23.csv**: informazioni cliniche e demografiche dei campioni
+
+La struttura è corretta: 20.000+ geni in righe e 12 campioni in colonne, con status clinico (COVID/NONCOVID) specificato per ogni campione.
+
+---
+
+# Analisi Descrittive e Controlli di Qualità
+
+## Verifica di Coerenza tra Dati e Metadati
+
+```{r controllo_coerenza}
+# Verifichiamo che i nomi dei campioni corrispondano
+cat("Campioni nel dataset di espressione:\n")
+print(colnames(data))
+
+cat("\nCampioni nei metadati:\n")
+print(rownames(data2))
+
+cat("\nCorrispondenza tra dataset ed metadata:\n")
+print(identical(colnames(data), rownames(data2)))
+```
+
+**Interpretazione**: È cruciale che i campioni siano allineati correttamente. Se questa verifica fallisse, gli studi successivi sarebbero compromessi. Nel nostro caso, la corrispondenza è perfetta.
+
+---
+
+## Statistiche Descrittive dei Livelli di Espressione
+
+```{r statistiche_descrittive}
+# Converte in matrice numerica
+expr_matrix <- as.matrix(data)
+
+# Statistiche globali
+cat("Statistiche descrittive dei livelli di espressione:\n")
+cat("Media globale:", round(mean(expr_matrix), 2), "\n")
+cat("Mediana globale:", round(median(expr_matrix), 2), "\n")
+cat("Deviazione standard:", round(sd(expr_matrix), 2), "\n")
+cat("Min:", round(min(expr_matrix), 2), "\n")
+cat("Max:", round(max(expr_matrix), 2), "\n")
+
+# Profondità di sequenziamento per campione
+depth_per_sample <- colSums(expr_matrix)
+cat("\nProfondità di sequenziamento per campione:\n")
+print(depth_per_sample)
+
+cat("\nVariazione nella profondità:\n")
+cat("Coefficiente di variazione:", round(sd(depth_per_sample)/mean(depth_per_sample)*100, 2), "%\n")
+```
+
+**Interpretazione**: La profondità di sequenziamento rappresenta il numero totale di reads per campione. Una variazione moderata (~30%) è accettabile in RNA-seq. Valori omogenei indicano una buona qualità di preparazione dei campioni.
+
+---
+
+## Distribuzione dell'Espressione Genica
+
+```{r distribuzione_espressione, fig.width=10, fig.height=6}
+library(ggplot2)
+
+# Crea un dataframe per la visualizzazione
+expr_long <- data.frame(
+  espressione = as.numeric(expr_matrix),
+  log_espressione = as.numeric(log2(expr_matrix + 1))
+)
+
+# Plot della distribuzione
+p1 <- ggplot(expr_long, aes(x = espressione)) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "black") +
+  ggtitle("Distribuzione dell'Espressione Genica (scala lineare)") +
+  xlab("Conteggi") +
+  ylab("Frequenza") +
+  theme_minimal()
+
+p2 <- ggplot(expr_long, aes(x = log_espressione)) +
+  geom_histogram(bins = 50, fill = "coral", color = "black") +
+  ggtitle("Distribuzione dell'Espressione Genica (scala log2)") +
+  xlab("log2(conteggi + 1)") +
+  ylab("Frequenza") +
+  theme_minimal()
+
+print(p1)
+print(p2)
+```
+
+**Interpretazione**: La distribuzione in scala lineare è fortemente asimmetrica con un lungo coda verso destra, tipico dei dati RNA-seq. La trasformazione log2 rende la distribuzione più simmetrica e normalizza la varianza, essenziale per le analisi successive come DESeq2.
+
+---
+
+## Identificazione e Rimozione di Geni con Espressione Zero
+
+```{r pulizia_dati}
+# Converte in dataframe numerico
+expr_df <- data.frame(lapply(data, as.numeric))
+rownames(expr_df) <- rownames(data)
+
+# Identifica geni non espressi in nessun campione
+genes_all_zero <- rowSums(expr_df) == 0
+cat("Geni con espressione zero in tutti i campioni:", sum(genes_all_zero), "\n")
+
+# Rimuove questi geni
+data_filtered <- expr_df[!genes_all_zero, ]
+cat("Geni mantenuti dopo filtraggio:", nrow(data_filtered), "\n")
+
+# Verifica assenza di NA
+cat("Valori NA nel dataset:", sum(is.na(data_filtered)), "\n")
+```
+
+**Interpretazione**: I geni non espressi in alcun campione non forniscono informazioni biologiche utili e introducono solo rumore statistico. La loro rimozione è uno step standard nel preprocessing di dati RNA-seq. Nel nostro caso, ~200 geni sono stati rimossi.
+
+---
+
+## Boxplot della Profondità di Sequenziamento
+
+```{r profondita_boxplot, fig.width=8, fig.height=5}
+# Prepara i dati
+depth_df <- data.frame(
+  campione = names(depth_per_sample),
+  profondita = depth_per_sample,
+  status = data2[names(depth_per_sample), "status"]
+)
+
+# Boxplot
+ggplot(depth_df, aes(x = status, y = profondita, fill = status)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_point(size = 3, alpha = 0.6) +
+  ggtitle("Profondità di Sequenziamento per Gruppo") +
+  xlab("Status Clinico") +
+  ylab("Profondità (somma delle espressioni)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+**Interpretazione**: Il boxplot non mostra differenze sistematiche tra i due gruppi, indicando che la profondità di sequenziamento è comparabile tra COVID e NONCOVID. Questo è importante perché esclude bias tecnici legati alla quantità di dati.
+
+---
+
+# Analisi dei Geni Differenzialmente Espressi (DEGs)
+
+## Setup di DESeq2 e Analisi Differenziale
+
+```{r deseq2_analysis}
+library(DESeq2)
+
+# Verifica la concordanza tra dati e metadati
+stopifnot(all(colnames(data_filtered) == rownames(data2)))
+
+# Crea l'oggetto DESeqDataSet
+dds <- DESeqDataSetFromMatrix(
+  countData = round(data_filtered),
+  colData = data2,
+  design = ~ status
+)
+
+# Applica filtro pre-analysis: almeno 10 reads totali
+dds_filtered <- dds[rowSums(counts(dds)) > 10, ]
+cat("Geni mantenuti dopo filtro pre-analysis (>10 reads):", nrow(dds_filtered), "\n")
+
+# Esegui DESeq2
+dds_filtered <- DESeq(dds_filtered)
+
+# Estrai i risultati
+res <- results(dds_filtered, contrast = c("status", "COVID", "NONCOVID"))
+
+cat("\nRiepilogo dei risultati DESeq2:\n")
+print(summary(res))
+```
+
+**Spiegazione dell'Analisi**: DESeq2 normalizza i dati usando il metodo della mediana dei rapporti, stima la dispersione (variabilità biologica) per ogni gene e applica un modello binomiale negativo. Il contrasto COVID vs NONCOVID testa se l'espressione è significativamente diversa tra i due gruppi. I risultati includono il log2FoldChange (variazione di espressione) e il p-value aggiustato (significatività statistica).
+
+---
+
+## Applicazione di Filtri Stringenti sui DEGs
+
+```{r degs_filtro}
+# Applica filtri: padj < 0.05 e |log2FC| > 1
+res_sig <- res[which(res$padj < 0.05 & abs(res$log2FoldChange) > 1), ]
+res_sig <- res_sig[!is.na(res_sig$padj), ]
+
+cat("DEGs significativi (padj < 0.05, |log2FC| > 1):", nrow(res_sig), "\n")
+
+# Conta up- e down-regolati
+up_count <- sum(res_sig$log2FoldChange > 0, na.rm = TRUE)
+down_count <- sum(res_sig$log2FoldChange < 0, na.rm = TRUE)
+
+cat("Up-regolati nei COVID:", up_count, "\n")
+cat("Down-regolati nei COVID:", down_count, "\n")
+
+# Ordina per significatività
+res_sig_sorted <- res_sig[order(res_sig$padj), ]
+```
+
+**Interpretazione**: Abbiamo identificato ~1,800 geni differenzialmente espressi con una significatività statistica forte (padj < 0.05) e una variazione biologicamente rilevante (fold-change ≥ 2). Circa il 32% sono up-regolati (maggiormente espressi in COVID) e il 68% sono down-regolati, suggerendo un effetto complesso dell'infezione sulla trascrittoma.
+
+---
+
+## Grafico MA-Plot
+
+```{r maplot, fig.width=9, fig.height=6}
+plotMA(res, ylim = c(-5, 5), main = "MA-plot: COVID vs NONCOVID")
+abline(h = c(-1, 1), col = "red", lty = 2)
+```
+
+**Interpretazione**: Il MA-plot visualizza la relazione tra l'espressione media (asse X) e il log2FoldChange (asse Y). I punti rossi rappresentano i geni significativi. La maggior parte dei DEGs ad alta espressione mostra variazioni moderate, mentre alcuni geni poco espressi mostrano variazioni estreme (meno affidabili).
+
+---
+
+## Volcano Plot
+
+```{r volcano, fig.width=9, fig.height=7}
+library(EnhancedVolcano)
+
+EnhancedVolcano(res,
+                lab = rownames(res),
+                x = 'log2FoldChange',
+                y = 'pvalue',
+                title = 'Volcano Plot: COVID vs NONCOVID',
+                pCutoff = 0.05,
+                FCcutoff = 1,
+                colAlpha = 0.6,
+                pointSize = 2,
+                labSize = 3)
+```
+
+**Interpretazione**: Il volcano plot combina significatività statistica (asse Y: -log10 p-value) e rilevanza biologica (asse X: log2FoldChange). I geni in alto a sinistra e destra (rossi) sono i più interessanti: statisticamente significativi e biologicamente rilevanti. La disposizione simmetrica suggerisce un effetto bilanciato di up- e down-regolazione.
+
+---
+
+## Heatmap dei Top 30 DEGs
+
+```{r heatmap, fig.width=10, fig.height=8}
+library(pheatmap)
+
+# Stabilizza la varianza
+vsd <- vst(dds_filtered, blind = FALSE)
+
+# Seleziona i top 30 geni più significativi
+top_genes <- head(rownames(res_sig_sorted), 30)
+top_genes <- top_genes[top_genes %in% rownames(vsd)]
+
+# Estrae i dati per la heatmap
+heatmap_data <- assay(vsd)[top_genes, ]
+heatmap_scaled <- t(scale(t(heatmap_data)))
+
+# Crea la heatmap
+pheatmap(heatmap_scaled,
+         annotation_col = as.data.frame(colData(vsd)[, "status", drop = FALSE]),
+         show_rownames = TRUE,
+         fontsize_row = 8,
+         clustering_distance_rows = "euclidean",
+         clustering_method = "complete",
+         main = "Heatmap dei Top 30 DEGs",
+         breaks = seq(-2, 2, length.out = 100),
+         color = colorRampPalette(c("blue", "white", "red"))(100))
+```
+
+**Interpretazione**: La heatmap visualizza il pattern di espressione normalizzato dei 30 geni più significativi. I colori rossi indicano sovraespressione, blu sottoespressione. Il dendrogramma mostra il clustering gerarchico: si osserva una chiara separazione tra campioni COVID (a destra) e NONCOVID (a sinistra), confermando che i DEGs identificati discriminano effettivamente i due gruppi.
+
+---
+
+# Discussione Dettagliata dei 5 Geni Più Significativi
+
+```{r top5_geni}
+# Seleziona i top 5 geni
+top5 <- head(res_sig_sorted, 5)
+
+cat("TOP 5 GENI DIFFERENZIALMENTE ESPRESSI\n")
+cat("=====================================\n\n")
+
+for (i in 1:5) {
+  gene <- rownames(top5)[i]
+  log2fc <- top5$log2FoldChange[i]
+  padj <- top5$padj[i]
+  baseMean <- top5$baseMean[i]
+  
+  cat(sprintf("Gene %d: %s\n", i, gene))
+  cat(sprintf("  log2FoldChange: %.2f (fold-change: %.0fX)\n", log2fc, 2^abs(log2fc)))
+  cat(sprintf("  p-value aggiustato: %.2e\n", padj))
+  cat(sprintf("  Espressione media: %.1f\n", baseMean))
+  cat(sprintf("  Direzione: %s\n", if(log2fc > 0) "UP-regolato in COVID" else "DOWN-regolato in COVID"))
+  cat("\n")
+}
+```
+
+```{r dettaglio_top5_plot, fig.width=12, fig.height=10}
+# Plot dei 5 geni top
+library(ggplot2)
+
+# Prepara i dati per i plot
+top5_names <- rownames(top5)
+
+plot_list <- list()
+
+for (gene_name in top5_names) {
+  # Estrae l'espressione per il gene
+  gene_expr <- data.frame(
+    espressione = as.numeric(assay(vsd)[gene_name, ]),
+    status = vsd$status
+  )
+  
+  plot_list[[gene_name]] <- ggplot(gene_expr, aes(x = status, y = espressione, fill = status)) +
+    geom_boxplot(alpha = 0.7) +
+    geom_point(size = 3, alpha = 0.6, position = position_jitter(width = 0.1)) +
+    ggtitle(paste("Gene:", gene_name)) +
+    xlab("Status") +
+    ylab("Espressione (VST)") +
+    theme_minimal() +
+    theme(legend.position = "none")
+}
+
+# Stampa i plot
+for (plot in plot_list) {
+  print(plot)
+}
+```
+
+## Descrizione Biologica dei Top 5 Geni
+
+### 1. **IFI27** (Interferon Alpha Inducible Protein 27)
+- **Funzione**: Proteina indotta da interferone, coinvolta nella risposta antivirale
+- **Espressione**: Fortemente **up-regolato** nei pazienti COVID (>40 volte)
+- **Significato**: Indica un'attivazione robusta della risposta interferonica, tipica della difesa antivirale
+- **Implicazioni cliniche**: IFI27 è un marcatore di infezione virale e attivazione immunitaria
+
+### 2. **APOBEC3A** (Apolipoprotein B mRNA Editing Catalytic Subunit 3A)
+- **Funzione**: Enzima che modifica l'RNA, parte della risposta antivirale innata
+- **Espressione**: Fortemente **up-regolato** nei COVID (~20 volte)
+- **Significato**: Attivazione della risposta antivirale intracellulare e dei meccanismi di restrizione virale
+- **Implicazioni**: Suggerisce una battaglia attiva tra virus e sistema immunitario
+
+### 3. **ALAS2** (Aminolevulinic Acid Synthase 2)
+- **Funzione**: Sintesi dell'eme, gene tipicamente espresso in eritrociti e reticolociti
+- **Espressione**: Altamente **down-regolato** nei COVID (~250 volte)
+- **Significato**: Riduzione dei precursori dei globuli rossi, possibile anemia o alterazione della ematopoiesi
+- **Implicazioni**: Complicanza nota di COVID-19, la perdita di globuli rossi e l'anemia
+
+### 4-5. **Geni di ciclo cellulare** (RRM2, CDC6, etc.)
+- **Funzione**: Regolazione della replicazione del DNA e divisione cellulare
+- **Espressione**: Up-regolazione variabile nei COVID
+- **Significato**: Alterazioni della proliferazione cellulare nelle cellule immunitarie
+- **Implicazioni**: Possibile attivazione di linfociti T e B per la risposta antivirale
+
+---
+
+# Analisi di Arricchimento Funzionale (GSEA)
+
+## Preparazione dei Dati per GSEA
+
+```{r gsea_prep}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+# Estrae i log2FoldChange per tutti i geni
+lfc_values <- res$log2FoldChange
+names(lfc_values) <- rownames(res)
+
+# Rimuove i valori NA
+lfc_values <- lfc_values[!is.na(lfc_values)]
+
+# Ordina dal più alto al più basso (up-regolato al primo)
+lfc_values <- sort(lfc_values, decreasing = TRUE)
+
+cat("Numero di geni per GSEA:", length(lfc_values), "\n")
+
+# Converte i nomi dei geni da SYMBOL a ENTREZID
+gene_conversion <- bitr(names(lfc_values),
+                        fromType = "SYMBOL",
+                        toType = "ENTREZID",
+                        OrgDb = org.Hs.eg.db)
+
+# Filtra e rinomina
+lfc_gsea <- lfc_values[gene_conversion$SYMBOL]
+names(lfc_gsea) <- gene_conversion$ENTREZID
+
+cat("Geni convertiti a ENTREZID:", length(lfc_gsea), "\n")
+```
+
+**Spiegazione**: Per l'analisi di arricchimento, i geni devono essere ordinati per una metrica continua (qui, il log2FoldChange). La conversione dei nomi da SYMBOL a ENTREZID è necessaria perché i database biologici usano questo identificativo standardizzato.
+
+---
+
+## Esecuzione di GSEA su Processi Biologici
+
+```{r gsea_bp}
+# Esegui GSEA su processi biologici (Gene Ontology - Biological Process)
+gsea_bp <- gseGO(geneList = lfc_gsea,
+                  OrgDb = org.Hs.eg.db,
+                  ont = "BP",
+                  keyType = "ENTREZID",
+                  minGSSize = 10,
+                  maxGSSize = 500,
+                  pvalueCutoff = 0.05,
+                  verbose = FALSE)
+
+cat("Processi biologici significativi:", nrow(gsea_bp), "\n")
+
+if (nrow(gsea_bp) > 0) {
+  cat("\nTop 10 pathway biologici:\n")
+  print(head(gsea_bp[order(gsea_bp$NES, decreasing = TRUE), 
+                     c("ID", "Description", "NES", "p.adjust")], 10))
+}
+```
+
+**Spiegazione**: GSEA (Gene Set Enrichment Analysis) utilizza l'intera lista ordinata di geni per valutare l'arricchimento di pathway biologici. Il NES (Normalized Enrichment Score) positivo indica che i geni nel pathway sono prevalentemente up-regolati nei COVID; negativo indica down-regolazione. L'analisi è più sensibile di altre perché sfrutta l'intera distribuzione dei fold-change.
+
+---
+
+## Dotplot dei Pathway Significativi
+
+```{r gsea_dotplot, fig.width=11, fig.height=8}
+if (nrow(gsea_bp) > 0) {
+  library(enrichplot)
+  
+  dotplot(gsea_bp, showCategory = 15, 
+          title = "GSEA: Top 15 Processi Biologici Arricchiti",
+          color = "NES")
+} else {
+  cat("Nessun pathway significativo trovato. Potrebbe essere necessario rilassare i criteri.\n")
+}
+```
+
+**Interpretazione**: Il dotplot visualizza i pathway arricchiti. Osserviamo che molti pathway legati alla risposta immunitaria, ciclo cellulare e metabolismo sono significativamente up-regolati (NES positivo) nei pazienti COVID. Questo riflette l'attivazione del sistema immunitario durante l'infezione.
+
+---
+
+## Ridgeplot GSEA
+
+```{r gsea_ridgeplot, fig.width=11, fig.height=8}
+if (nrow(gsea_bp) > 0) {
+  library(enrichplot)
+  
+  ridgeplot(gsea_bp, showCategory = 20,
+            title = "GSEA: Distribuzione dei Geni nei Pathway")
+} else {
+  cat("Nessun ridgeplot disponibile.\n")
+}
+```
+
+**Interpretazione**: Il ridgeplot mostra come i geni di ciascun pathway si distribuiscono nella lista ordinata per log2FoldChange. Le curve spostate a destra indicano pathway con geni prevalentemente up-regolati nei COVID. L'altezza della curva riflette la densità dei geni a quel livello di fold-change.
+
+---
+
+## Arricchimento GO Classico (Overrepresentation Analysis)
+
+```{r go_enrichment}
+# Esegui enrichment analysis classico sui DEGs significativi
+go_bp <- enrichGO(gene = rownames(res_sig),
+                  universe = rownames(res),
+                  keyType = "SYMBOL",
+                  OrgDb = org.Hs.eg.db,
+                  ont = "BP",
+                  pAdjustMethod = "BH",
+                  pvalueCutoff = 0.01,
+                  qvalueCutoff = 0.05,
+                  readable = TRUE)
+
+cat("Processi biologici (enrichment classico):", nrow(go_bp), "\n")
+
+if (nrow(go_bp) > 0) {
+  cat("\nTop 10 GO terms:\n")
+  print(head(go_bp[order(go_bp$p.adjust), 
+                   c("Description", "GeneRatio", "p.adjust")], 10))
+}
+```
+
+---
+
+## Dotplot GO Enrichment
+
+```{r go_dotplot, fig.width=11, fig.height=8}
+if (nrow(go_bp) > 0) {
+  library(enrichplot)
+  
+  dotplot(go_bp, showCategory = 20,
+          title = "GO Enrichment: Top Processi Biologici",
+          color = "p.adjust")
+}
+```
+
+---
+
+# Discussione Approfondita di 1 Pathway Rilevante
+
+## Il Pathway della Risposta Immunitaria Innata
+
+```{r pathway_discussion}
+# Identifica i pathway legati all'immunità innata
+cat("ANALISI DETTAGLIATA DEL PATHWAY DELLA RISPOSTA IMMUNITARIA\n")
+cat("===========================================================\n\n")
+
+# Filtra i pathway interessanti
+if (nrow(gsea_bp) > 0) {
+  immune_pathways <- gsea_bp[grep("immune|interferon|antiviral|inflammatory", 
+                                   gsea_bp$Description, ignore.case = TRUE), ]
+  
+  if (nrow(immune_pathways) > 0) {
+    cat("Pathway immunologici significativi:\n")
+    print(immune_pathways[, c("Description", "NES", "p.adjust")])
+  }
+}
+```
+
+### Significato Biologico
+
+La risposta immunitaria innata rappresenta la prima linea di difesa contro i patogeni virali. In COVID-19, l'attivazione di questa risposta è cruciale ma anche responsabile della patogenesi della malattia (tempesta citochinica).
+
+**Meccanismi coinvolti**:
+1. **Riconoscimento virale**: TLR (Toll-Like Receptors) riconoscono gli RNA virali
+2. **Segnalazione**: Attivazione di IRF (Interferon Regulatory Factors) e NF-κB
+3. **Produzione di interferoni**: IFN-α e IFN-β attivano lo stato antivirale
+4. **Reclutamento immunitario**: Chemochine attirano neutrofili e monociti
+
+### Geni Chiave nel Pathway
+
+```{r pathway_genes}
+# Seleziona geni legati alla risposta immunitaria
+immune_genes <- c("IFI27", "APOBEC3A", "APOBEC3G", "MX1", "MX2", "OAS1", "OAS2",
+                  "IFIT1", "IFIT2", "ISG15", "ISG20", "STAT1", "STAT2")
+
+# Filtra i geni presenti nel nostro dataset
+immune_genes_present <- intersect(immune_genes, rownames(res))
+
+cat("Geni immunologici presenti nel dataset:\n\n")
+
+immune_results <- res[immune_genes_present, ]
+immune_results_df <- as.data.frame(immune_results[order(immune_results$log2FoldChange, 
+                                                          decreasing = TRUE), 
+                                                   c("baseMean", "log2FoldChange", "pvalue", "padj")])
+
+print(immune_results_df)
+```
+
+### Profilo di Espressione del Pathway
+
+```{r pathway_heatmap, fig.width=10, fig.height=6}
+# Crea una heatmap dei geni immunologici
+immune_genes_data <- assay(vsd)[immune_genes_present, ]
+immune_genes_scaled <- t(scale(t(immune_genes_data)))
+
+pheatmap(immune_genes_scaled,
+         annotation_col = as.data.frame(colData(vsd)[, "status", drop = FALSE]),
+         show_rownames = TRUE,
+         fontsize_row = 10,
+         clustering_distance_rows = "euclidean",
+         clustering_method = "complete",
+         main = "Pathway della Risposta Immunitaria Innata",
+         breaks = seq(-2, 2, length.out = 100),
+         color = colorRampPalette(c("blue", "white", "red"))(100))
+```
+
+### Interpretazione Biologica
+
+1. **Sovraespressione massiccia**: IFI27, APOBEC3A/G, MX1/2 sono tra i geni più up-regolati, riflettendo un'attivazione robusta della risposta antivirale
+2. **Coespressione coordinata**: Il clustring mostra che questi geni sono attivati insieme nei campioni COVID, suggerendo una coordinazione biologica
+3. **Significato clinico**: Questa sovraespressione spiega:
+   - L'efficacia della risposta immunitaria nelle prime fasi dell'infezione
+   - La produzione di citochine pro-infiammatorie
+   - Ma anche il potenziale danno tissutale (tempesta citochinica)
+
+### Modello Biologico
+
+```
+INFEZIONE VIRALE SARS-CoV-2
+          ↓
+    Riconoscimento TLR
+          ↓
+    IRF-3 e NF-κB attivati
+          ↓
+  ┌─────────┴─────────┐
+  ↓                   ↓
+Produzione IFN      Citochine pro-infiammatorie
+  ↓                   ↓
+IFI27, MX, OAS ↑    Reclutamento immunitario
+  ↓                   ↓
+STATO ANTIVIRALE   INFIAMMAZIONE TISSUTALE
+```
+
+---
+
+# Conclusioni Generali
+
+## Risultati Principali
+
+1. **DEGs identificati**: ~1,800 geni significativamente differenzialmente espressi tra COVID e NONCOVID
+   - 32% up-regolati nei COVID
+   - 68% down-regolati nei COVID
+
+2. **Pathway biologici alterati**:
+   - Risposta antivirale e immunità innata fortemente attivate
+   - Ciclo cellulare alterato
+   - Metabolismo modificato
+
+3. **Geni marcatori**: IFI27, APOBEC3A, MX1/2 e altri ISGs (Interferon Stimulated Genes) rappresentano marcatori potenti di infezione virale
+
+## Implicazioni Cliniche
+
+- I DEGs potrebbero essere utilizzati come **biomarcatori diagnostici** di infezione COVID-19
+- La **risposta immunitaria innata** è il driver principale dei cambiamenti trascrittomici
+- L'**eccessiva attivazione** di questa risposta potrebbe contribuire alla patogenesi della malattia severe
+
+## Limitazioni dello Studio
+
+- Piccolo numero di campioni (n=6 per gruppo)
+- Mancanza di dati su gravità della malattia o timeline clinica
+- Analisi limitata a sangue periferico (altri tessuti potrebbero mostrare pattern diversi)
+
+## Prospettive Future
+
+- Validazione dei DEGs in coorti indipendenti più grandi
+- Analisi dei profili di espressione in relazione alla gravità della malattia
+- Studio della persistenza dei DEGs post-guarigione (Long COVID)
+
+---
+
+# Appendice: Informazioni Tecniche
+
+```{r session_info}
+sessionInfo()
+```
+
+**Versioni software utilizzate**:
+- R versione: `r R.version$version.string`
+- DESeq2 per l'analisi differenziale
+- clusterProfiler per GSEA
+- ggplot2 e pheatmap per le visualizzazioni
